@@ -1,0 +1,6 @@
+name: capellini_prodigal
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - prodigal>=2.6

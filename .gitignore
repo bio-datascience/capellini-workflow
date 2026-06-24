@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Snakemake
+.snakemake/
+
+# pytest
+.pytest_cache/
+
+# Bundled reference files (distributed as GitHub release assets)
+capellini_workflow/data/references/*.fasta
+capellini_workflow/data/references/spacers/*.fasta
+
+# Study-specific configs (contain private paths)
+config/ibd.yaml
+config/crc.yaml
+config/leu.yaml

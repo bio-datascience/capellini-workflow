@@ -1,0 +1,87 @@
+# CAPELLINI workflow default configuration
+# Copy this file and fill in required paths for your study.
+
+cores: 4                           # Number of CPU cores for Snakemake
+
+# ── Global paths (REQUIRED - fill these in) ──────────────────────────────────
+base: ""                           # Root output directory
+download_path: ""                  # Where to cache downloaded references
+virus_fasta_name: ""               # e.g. "virusCollection.fasta"
+metadata_path: ""                  # Path to sample metadata CSV
+bacterial_raw_fasta_folder: ""     # Folder with raw 16S FASTQ files
+
+# Reference paths (auto-derived from download_path if left empty)
+silva_ref_path: ""
+silva_taxmap_path: ""
+
+# ── Pipeline flags ───────────────────────────────────────────────────────────
+species_level: false
+fresh_start: false
+ref_removal: true
+
+# ── DADA2 ────────────────────────────────────────────────────────────────────
+direction: "forward"               # "forward", "reverse", or "paired"
+bacteria_fasta_name: "16S_DADA2_bacteria.fasta"
+fasta_generation: true
+chimera_removal: false             # Run removeBimeraDenovo after denoising
+
+# ── Harmonizer (progenomes-harmonizer) ───────────────────────────────────────
+min_bitscore: 50
+max_matches: 20
+isolate_ref_16S: true
+mapping_saving: true
+add_taxonomy: true
+extend_taxonomy: true
+
+# NCBI taxonomy
+ncbi_taxdmp_url: "https://ftp.ncbi.nih.gov/pub/taxonomy/taxdmp.zip"
+
+# proGenomes3 URLs
+genes_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.genes.representatives.fasta.bz2"
+bacContigs_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.contigs.representatives.fasta.bz2"
+protein_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.proteins.representatives.fasta.bz2"
+
+# ── SpacePHARER ──────────────────────────────────────────────────────────────
+min_n_spacers: 3
+min_length: 23
+max_length: 47
+fdr: 0.05
+keep_spacers_collection: true
+remove_decomp_fasta: true
+
+# ── Protein clustering (ProCs Maker — procs_maker) ──────────────────────────
+matrix_type: "count"
+batch_size: 1500
+save_single_bacgenome_collection: false
+keep_coords: false
+filter_1bac_1vir: false
+remove_collections: false
+
+# ── Network ──────────────────────────────────────────────────────────────────
+run_common_abundance: true
+run_shrinkage_correlations: true
+run_raw_crispr_networks: true
+run_smooth_crispr: true
+run_xstar: true
+prevalence: 0.10
+keep_column: "keep_for_analysis"
+bacteria_taxonomy_rank: "target_taxids"
+bacterial_ranks: ["Phylum", "Class", "Order", "Family", "progenomes_taxid_genus"]
+bacterial_weights: [1, 2, 3, 6, 8]
+crispr_smooth_alpha: 0.95
+transpose_raw_crispr_after_load: true
+pseudocount: 1.0e-6
+lam: 0.5
+n_steps: 1
+preserve_scale: false
+
+# Network input paths (auto-derived from base/direction if left empty)
+virus_abundance_raw: ""
+bacteria_otu: ""
+bacteria_taxonomy: ""
+phage_host_predictions: ""
+tax_bac_for_smoothing: ""
+tax_vir: ""
+viral_ranks: ["lev8", "lev7", "lev6", "lev5", "lev4", "lev3", "lev2", "lev1", "lev0"]
+viral_weights: [1, 1, 2, 3, 4, 6, 8, 10, 12]
+aggregate_viral_rank: "lev0"

@@ -1,0 +1,7 @@
+name: capellini_spacepharer
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - spacepharer>=0.8
+  - minced>=0.4

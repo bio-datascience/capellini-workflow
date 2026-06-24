@@ -1,0 +1,10 @@
+name: capellini_dada2
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-base>=4.1
+  - bioconductor-dada2>=1.22
+  - bioconductor-phyloseq>=1.38
+  - r-data.table
+  - r-netcomi
