@@ -56,8 +56,27 @@ def _resolve_cores(cfg: dict) -> int:
         return int(raw)
     return _default_cores()
 
-# Locate the Snakefile relative to this package
-_WORKFLOW_DIR = Path(__file__).resolve().parent.parent
+def _resolve_workflow_dir() -> Path:
+    """Locate the directory holding the Snakefile, rules/ and scripts/.
+
+    Two layouts must work:
+      * a source checkout, where they sit next to the package directory;
+      * a pip install, where setuptools ``data-files`` puts them under
+        ``<sys.prefix>/capellini_workflow/`` — not in site-packages.
+
+    Returns the source layout when neither is found, so error messages point at
+    the more familiar path.
+    """
+    source = Path(__file__).resolve().parent.parent
+    if (source / "Snakefile").is_file():
+        return source
+    installed = Path(sys.prefix) / "capellini_workflow"
+    if (installed / "Snakefile").is_file():
+        return installed
+    return source
+
+
+_WORKFLOW_DIR = _resolve_workflow_dir()
 _SNAKEFILE = _WORKFLOW_DIR / "Snakefile"
 _SCRIPTS_DIR = _WORKFLOW_DIR / "scripts"
 

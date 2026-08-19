@@ -38,11 +38,14 @@ include = ["capellini_workflow*"]
 [tool.setuptools.package-data]
 capellini_workflow = ["data/references/**/*"]
 
+# Workflow files are installed under <sys.prefix>/capellini_workflow/. Each
+# subdirectory needs its own entry: a single "capellini_workflow" key flattens
+# rules/ and scripts/ into one directory, which breaks the Snakefile's
+# `include: "rules/*.smk"` and the CLI's scripts lookup.
+# Only blank.yaml ships — config/*.yaml would sweep up local study configs
+# (with absolute personal paths) into the wheel.
 [tool.setuptools.data-files]
-"capellini_workflow" = [
-    "Snakefile",
-    "rules/*.smk",
-    "scripts/*.py",
-    "scripts/*.R",
-    "config/*.yaml",
-]
+"capellini_workflow" = ["Snakefile"]
+"capellini_workflow/rules" = ["rules/*.smk"]
+"capellini_workflow/scripts" = ["scripts/*.py", "scripts/*.R"]
+"capellini_workflow/config" = ["config/blank.yaml"]
