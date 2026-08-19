@@ -5,6 +5,15 @@ library(phyloseq)
 library(data.table)
 library(NetCoMi)
 
+# ---- vector-memory ceiling ----
+# On macOS R caps its vector heap at the machine's physical RAM (e.g. 16 GB) and
+# aborts with "vector memory limit reached" rather than using virtual memory.
+# Large cohorts briefly need a little more than RAM during assignTaxonomy(), so
+# lift the cap and let the OS provide the peak via compression/swap. This only
+# affects whether the run *completes* — it changes no results — and a genuinely
+# runaway allocation still fails cleanly at the (generous) ceiling below.
+try(suppressWarnings(mem.maxVSize(vsize = 48 * 1024)), silent = TRUE)  # 48 GB, in Mb
+
 # ---- reproducibility ----
 # Single seed reused before every stochastic step.
 # Change here if you want to verify run-to-run stability.
@@ -16,8 +25,8 @@ args <- commandArgs(trailingOnly = TRUE)
 
 if (length(args) < 6) {
   stop(
-    "Usage: Rscript dada2_pipeline.R <input_path> <output_path> <ref_path> <taxmap_file> <direction> <fasta_generation> [chimera_removal]\n",
-    "Example: Rscript dada2_pipeline.R /path/to/fastq /path/to/out /path/to/ref.fa.gz /path/to/taxmap.txt paired TRUE FALSE\n"
+    "Usage: Rscript dada2_pipeline.R <input_path> <output_path> <ref_path> <taxmap_file> <direction> <fasta_generation> [chimera_removal] [species_path] [species_url]\n",
+    "Example: Rscript dada2_pipeline.R /path/to/fastq /path/to/out /path/to/ref.fa.gz /path/to/taxmap.txt paired TRUE FALSE /refs/silva_species_assignment_v138.1.fa.gz\n"
   )
 }
 
@@ -37,6 +46,13 @@ chimera_removal  <- if (length(args) >= 7) as.logical(args[7]) else FALSE
 if (is.na(chimera_removal)) chimera_removal <- FALSE
 message("chimera_removal flag: ", chimera_removal)
 
+# 8th/9th args (optional) — SILVA *species-assignment* reference used by
+# addSpecies(). This is a separate download from the train_set; if the file is
+# absent it is fetched once from species_url (see ensure_species_ref below).
+species_path <- if (length(args) >= 8) args[8] else ""
+species_url  <- if (length(args) >= 9 && nzchar(args[9])) args[9] else
+  "https://zenodo.org/records/4587955/files/silva_species_assignment_v138.1.fa.gz?download=1"
+
 if (!dir.exists(output_path)) dir.create(output_path, recursive = TRUE)
 
 # ---- helpers ----
@@ -53,6 +69,36 @@ find_fastqs <- function(path) {
 }
 
 basename_noext <- function(x) sub("\\.(fastq|fq)(\\.gz)?$", "", basename(x), ignore.case = TRUE)
+
+# ---- ensure the SILVA species-assignment reference is available ----
+# addSpecies() needs the *species* FASTA, which ships separately from the
+# train_set used by assignTaxonomy(). Downloaded once on demand; written to a
+# .part file and renamed so an interrupted download can never be mistaken for a
+# complete reference on the next run.
+ensure_species_ref <- function(path, url) {
+  if (!nzchar(path)) {
+    stop("No species reference path was passed, but addSpecies() requires one.\n",
+         "The location is derived from 'download_path' in the config — check ",
+         "that download_path is set.")
+  }
+  if (file.exists(path) && file.size(path) > 0) return(path)
+  message("SILVA species-assignment reference not found — downloading:\n  ", url)
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  tmp <- paste0(path, ".part")
+  ok <- tryCatch({
+    utils::download.file(url, destfile = tmp, mode = "wb", quiet = FALSE)
+    TRUE
+  }, error = function(e) {
+    message("Download failed: ", conditionMessage(e)); FALSE
+  })
+  if (!ok || !file.exists(tmp) || file.size(tmp) == 0) {
+    unlink(tmp)
+    stop("Could not obtain the SILVA species-assignment reference from: ", url)
+  }
+  file.rename(tmp, path)
+  message("Species reference saved to: ", path)
+  path
+}
 
 # ---- add NCBI taxid from SILVA taxonomy file (tax_slv_ssu_138.1.txt) ----
 # NOTA: usa tax_slv_ssu_138.1.txt (path -> NCBI taxid), NON taxmap_slv_ssu_ref_nr_138.1.txt
@@ -277,8 +323,31 @@ if (tolower(direction) %in% c("forward", "reverse")) {
 # was tried but produces ~4x fewer ASVs (5.5k vs 20k on the IBD test set),
 # which in turn yields a much smaller target_spacers.fasta and triggers an
 # intermittent SpacePHARER findpam Bus error on macOS for this corpus.
+# Free the large per-sample denoising objects before the reference-based
+# taxonomy steps. assignTaxonomy() loads a big k-mer database and, on large
+# cohorts, peaks near the machine's RAM; only seqtab is needed from here on, so
+# reclaiming errF/dadaFs/mergers/etc. gives it headroom. rm() is guarded by
+# ls() so it is safe in whichever branch (single/paired) produced seqtab.
+rm(list = intersect(
+  c("dada_res", "err", "dadaFs", "dadaRs", "errF", "errR", "mergers"),
+  ls()
+))
+invisible(gc(full = TRUE))
+
 set.seed(SEED)
 taxa <- assignTaxonomy(seqtab, ref_path, minBoot = 60, multithread = TRUE)
+
+# ---- species-level assignment ----
+# addSpecies() does exact (100% identity, unambiguous) matching against the
+# SILVA species reference and adds a Species column holding the *epithet*
+# ("coli"). The harmonizer rejoins Genus + Species into the NCBI binomial
+# ("Escherichia coli") and resolves the proGenomes taxid bounded inside that
+# species' genus space. Only a minority of gut ASVs match exactly — the rest
+# keep Species = NA and fall through to the genus/family layers.
+species_ref <- ensure_species_ref(species_path, species_url)
+taxa <- addSpecies(taxa, species_ref)
+message("addSpecies(): ", sum(!is.na(taxa[, "Species"])), " / ", nrow(taxa),
+        " ASVs received a species-level assignment")
 
 sample_data_df <- data.frame(SampleID = sample.names, SampleType = "Type1", row.names = sample.names)
 physeq <- phyloseq(

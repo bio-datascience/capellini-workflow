@@ -26,9 +26,40 @@ from rich.text import Text
 CONSOLE = Console()
 LAST_CONFIG_FILE = Path.home() / ".capellini" / "last_config"
 
+# Fallback when `cores` is absent (or not a usable integer) in the YAML config.
+_FALLBACK_CORES = 4
+
+
+def _default_cores() -> int:
+    """Cores to use when the config does not specify any: all of them.
+
+    Leaving ``cores`` unset in the config means "use this machine", so we detect
+    the logical CPU count rather than assuming a small number. Falls back to
+    ``_FALLBACK_CORES`` only if the count cannot be determined.
+    """
+    return os.cpu_count() or _FALLBACK_CORES
+
+
+def _resolve_cores(cfg: dict) -> int:
+    """Resolve the core count from a loaded config.
+
+    Accepts an int, or a string holding one (YAML quirks); anything else —
+    including an empty value — falls back to :func:`_default_cores`, which also
+    keeps Snakemake from failing on ``cores: ""`` with a ResourceConstraintError.
+    """
+    raw = cfg.get("cores")
+    if isinstance(raw, bool):  # bools are ints in Python; not a core count
+        return _default_cores()
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit() and int(raw) > 0:
+        return int(raw)
+    return _default_cores()
+
 # Locate the Snakefile relative to this package
 _WORKFLOW_DIR = Path(__file__).resolve().parent.parent
 _SNAKEFILE = _WORKFLOW_DIR / "Snakefile"
+_SCRIPTS_DIR = _WORKFLOW_DIR / "scripts"
 
 LOGO = r"""
               /   /   /   /   /   /   /   /   /   /   /   /   /   /   /   /   /   /
@@ -87,6 +118,7 @@ CONFIG_SECTIONS: list[tuple[str, list[str]]] = [
     ("Resources (download URLs)", [
         "ncbi_taxdmp_url", "genes_reference_url",
         "bacContigs_reference_url", "protein_reference_url",
+        "silva_species_url",
     ]),
     ("Global settings", ["species_level", "fresh_start", "ref_removal"]),
     ("DADA2", ["direction", "bacteria_fasta_name", "fasta_generation", "chimera_removal"]),
@@ -208,7 +240,7 @@ def _bundled_data_dir() -> Path:
 def _bundled_reference_paths() -> tuple[Path, Path]:
     data = _bundled_data_dir()
     return (
-        data / "references" / "progenome16S.fasta",
+        data / "references" / "pg4_16s.fasta",
         data / "references" / "spacers" / "spacers_CompleteCollection.fasta",
     )
 
@@ -326,18 +358,19 @@ def _run_dry_run_summary(configfile: Path, cores: int) -> None:
 
 # ── Validation ───────────────────────────────────────────────────────────────
 
-# Labels of bundled references that can be downloaded via fetch_references().
-# Only these block preflight and trigger the "Download now?" prompt.
-_REFERENCE_LABELS = {
-    "Bundled spacers_CompleteCollection.fasta",
-}
+# Bundled references are no longer distributed as downloads. Both the 16S
+# reference (built with barrnap) and the spacer collection (built with MinCED)
+# are produced by the workflow at runtime when missing, or supplied by the user
+# — so nothing here should block preflight or trigger a GitHub download.
+_REFERENCE_LABELS: set[str] = set()
 
-# Labels of references the workflow regenerates automatically at runtime
-# (e.g. progenome16S.fasta is filtered from the genes reference by the
-# harmonizer the first time it's needed). These are shown in "Validate
-# inputs" for visibility but never block the pipeline.
+# Labels of references the workflow regenerates automatically at runtime:
+#   • pg4_16s.fasta                   — barrnap on the proGenomes4 genome contigs
+#   • spacers_CompleteCollection.fasta — MinCED on the proGenomes4 genome contigs
+# These are shown in "Validate inputs" for visibility but never block the pipeline.
 _AUTO_REGENERABLE_LABELS = {
-    "Bundled progenome16S.fasta",
+    "Bundled pg4_16s.fasta",
+    "Bundled spacers_CompleteCollection.fasta",
 }
 
 
@@ -375,11 +408,11 @@ def _check_inputs(cfg: dict) -> tuple[list[tuple[str, bool, str]], list[tuple[st
 
     try:
         bundled_16s, bundled_spacers = _bundled_reference_paths()
-        paths.append(("Bundled progenome16S.fasta", bundled_16s.exists(), str(bundled_16s)))
+        paths.append(("Bundled pg4_16s.fasta", bundled_16s.exists(), str(bundled_16s)))
         paths.append(("Bundled spacers_CompleteCollection.fasta",
                       bundled_spacers.exists(), str(bundled_spacers)))
     except (ModuleNotFoundError, FileNotFoundError):
-        paths.append(("Bundled progenome16S.fasta", False, "<not installed>"))
+        paths.append(("Bundled pg4_16s.fasta", False, "<not installed>"))
         paths.append(("Bundled spacers_CompleteCollection.fasta", False, "<not installed>"))
 
     deps: list[tuple[str, bool, str]] = []
@@ -704,13 +737,37 @@ def _live_progress(stages: list[str], session: "_Session", dry_run: bool = False
             pass
 
 
+# ── Post-run report ──────────────────────────────────────────────────────────
+
+def _run_report(config_path: Path | None) -> None:
+    """Print per-stage statistics + figures for the given run config.
+
+    Runs ``scripts/report.py`` with the current interpreter so it shares this
+    environment (matplotlib, seaborn, networkx, the harmonizer). Never raises —
+    a report failure must not mask the pipeline result.
+    """
+    if config_path is None:
+        return
+    script = _SCRIPTS_DIR / "report.py"
+    if not script.exists():
+        return
+    CONSOLE.print("\n[cyan]Generating run report (statistics + figures)…[/cyan]")
+    try:
+        subprocess.run(
+            [sys.executable, str(script), "--configfile", str(config_path)],
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        CONSOLE.print(f"[yellow]Report generation skipped: {exc}[/yellow]")
+
+
 # ── Config session ───────────────────────────────────────────────────────────
 
 class _Session:
     def __init__(self) -> None:
         self.config_path: Path | None = None
         self.config: dict | None = None
-        self.cores: int = 4
+        self.cores: int = _default_cores()
 
     def ensure_loaded(self) -> bool:
         if self.config is not None:
@@ -740,11 +797,10 @@ class _Session:
             CONSOLE.print(f"[red]Failed to load config:[/red] {exc}")
             return False
         self.config_path = path.resolve()
-        # Pull cores from YAML so it persists across sessions. The Settings
-        # menu can still override it for the current session.
-        yaml_cores = self.config.get("cores")
-        if isinstance(yaml_cores, int) and yaml_cores > 0:
-            self.cores = yaml_cores
+        # Pull cores from YAML so it persists across sessions; when the key is
+        # absent we use every core on the machine. The Settings menu can still
+        # override it for the current session.
+        self.cores = _resolve_cores(self.config)
         CONSOLE.print(f"[green]Loaded config:[/green] {path}")
         return True
 
@@ -902,6 +958,7 @@ def _selected_stages_menu(session: _Session) -> None:
             _live_progress(ordered, session)
         except RuntimeError as exc:
             _print_failure(exc)
+        _run_report(session.config_path)
         _pause()
 
 
@@ -934,6 +991,7 @@ def _run_pipeline_menu(session: _Session) -> None:
                 questionary.Choice("Run selected stages", "run_selected"),
                 questionary.Choice("Run single stage", "run_one"),
                 questionary.Choice("Dry run (show what would be done)", "dry_run"),
+                questionary.Choice("Statistics & figures (report)", "report"),
                 questionary.Separator(),
                 questionary.Choice(" » Back to main menu", "back"),
             ],
@@ -943,6 +1001,14 @@ def _run_pipeline_menu(session: _Session) -> None:
             return
         if choice == "run_selected":
             _selected_stages_menu(session)
+            continue
+        if choice == "report":
+            if not session.ensure_loaded():
+                _pause()
+                continue
+            _refresh_screen()
+            _run_report(session.config_path)
+            _pause()
             continue
         if choice == "run_one":
             _single_stage_menu(session)
@@ -963,6 +1029,7 @@ def _run_pipeline_menu(session: _Session) -> None:
                 _live_progress(list(STAGE_ORDER), session)
             except RuntimeError as exc:
                 _print_failure(exc)
+            _run_report(session.config_path)
             _pause()
 
 
@@ -983,7 +1050,7 @@ def _cli_run(argv: list[str]) -> int:
     parser.add_argument(
         "--cores", "-j", type=int, default=None,
         help="Number of cores for Snakemake "
-             "(default: value of `cores` in YAML, falling back to 4)",
+             "(default: value of `cores` in YAML, or every core on this machine)",
     )
     parser.add_argument(
         "--target", nargs="*", default=None,
@@ -1013,13 +1080,12 @@ def _cli_run(argv: list[str]) -> int:
         print(f"ERROR: Snakefile not found: {_SNAKEFILE}", file=sys.stderr)
         return 1
 
-    # Resolve cores: CLI flag wins, else YAML `cores`, else 4.
+    # Resolve cores: CLI flag wins, else YAML `cores`, else every core.
     if args.cores is None:
         try:
-            yaml_cores = _load_yaml(configfile).get("cores")
-            args.cores = yaml_cores if isinstance(yaml_cores, int) and yaml_cores > 0 else 4
+            args.cores = _resolve_cores(_load_yaml(configfile))
         except Exception:
-            args.cores = 4
+            args.cores = _default_cores()
 
     extra = []
     if args.use_conda:
@@ -1048,6 +1114,9 @@ def _cli_run(argv: list[str]) -> int:
 
     if result.returncode != 0 and not args.dry_run:
         _unlock_snakemake(configfile)
+    elif result.returncode == 0 and not args.dry_run:
+        # Print per-stage statistics + figures after a successful run.
+        _run_report(configfile)
     return result.returncode
 
 

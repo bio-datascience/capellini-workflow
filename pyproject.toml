@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "capellini-workflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "CAPELLINI Snakemake workflow: CRISPR-Abundance Phage-Evidence Linkage for Network Inference"
 requires-python = ">=3.10"
 dependencies = [

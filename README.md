@@ -41,6 +41,7 @@ pip install git+https://github.com/bio-datascience/capellini-workflow.git
 | `spacepharer` | spacepharer |
 | `minced` | spacepharer (CRISPR spacer extraction) |
 | `prodigal` | protein_clusters (viral gene prediction) |
+| `barrnap` | harmonize — only when building the proGenomes4 16S reference (skipped if `reference_16s` is bundled/supplied) |
 | `Rscript` | dada2 (with packages: DADA2, phyloseq, data.table) |
 
 ---
@@ -91,7 +92,7 @@ These five keys must be set before the pipeline can run:
 | Key | Description |
 |---|---|
 | `base` | Root output directory. All pipeline outputs go under this path. |
-| `download_path` | Directory where large reference files are cached (`progenomes3` archives, NCBI taxonomy, SpacePHARER database). |
+| `download_path` | Directory where large reference files are cached (proGenomes4 archives, NCBI taxonomy, SpacePHARER database). |
 | `virus_fasta_name` | Filename of the viral contigs FASTA, expected at `<base>/<virus_fasta_name>`. |
 | `metadata_path` | Path to the sample metadata CSV. Must contain a `keep_column` column (see `keep_column` below) to mark samples included in the analysis. |
 | `bacterial_raw_fasta_folder` | Folder containing the raw 16S FASTQ files (one per sample), used by the DADA2 rule. |
@@ -123,7 +124,8 @@ These five keys must be set before the pipeline can run:
 | `min_bitscore` | `50` | Minimum MMseqs2 bitscore for a hit to be accepted during 16S mapping. |
 | `max_matches` | `20` | Maximum MMseqs2 hits retained per ASV query. |
 | `ncbi_taxdmp_url` | NCBI FTP | Override URL for the NCBI taxonomy dump archive. |
-| `genes_reference_url` | ProGenomes3 EMBL | Override URL for the ProGenomes3 genes archive. |
+| `reference_16s` | `""` | Optional path to a pre-built proGenomes4 16S reference (`pg4_16s.fasta`). When set, the harmonize rule skips building it with barrnap (and the ~46 GB genome-contigs download). Leave empty to use the bundled reference or build on demand. |
+| `pg4_ncbi_taxonomy` | `""` | Optional path to the proGenomes4 `pg4_ncbi_taxonomy.tsv(.gz)` (`GCA → taxid` map). Auto-downloaded to `download_path` if empty. |
 
 ### SpacePHARER
 
@@ -134,19 +136,22 @@ These five keys must be set before the pipeline can run:
 | `max_length` | `47` | Maximum spacer length (bp). |
 | `fdr` | `0.05` | False discovery rate threshold for SpacePHARER phage-host predictions. |
 | `keep_spacers_collection` | `true` | Keep the intermediate spacers FASTA after SpacePHARER completes. |
-| `remove_decomp_fasta` | `true` | Delete the decompressed ProGenomes3 contigs FASTA after spacer search. |
-| `bacContigs_reference_url` | ProGenomes3 EMBL | Override URL for the ProGenomes3 contigs archive used for CRISPR spacer search. |
+| `remove_decomp_fasta` | `true` | Delete the decompressed proGenomes4 contigs FASTA after spacer search. |
+
+> Spacepharer uses the **bundled** proGenomes4 spacer collection and joins on
+> NCBI taxids. Only if that collection is absent does it regenerate spacers from
+> the proGenomes4 genome contigs (`pg4_genomes_representatives.fna.gz`) with
+> MinCED.
 
 ### Protein clustering (procs-maker)
 
 | Key | Default | Description |
 |---|---|---|
-| `batch_size` | `1500` | Genome batch size for streaming the ProGenomes3 protein archive. Reduce if you run out of RAM. |
+| `batch_size` | `1500` | Genome batch size for streaming the proGenomes4 protein archive. Reduce if you run out of RAM. |
 | `filter_1bac_1vir` | `false` | Keep only protein clusters containing at least one bacterial and one viral protein (cross-domain clusters only). |
 | `save_single_bacgenome_collection` | `false` | Save individual per-genome protein FASTA files in addition to the combined collection. |
 | `keep_coords` | `false` | Keep Prodigal's `coords.gbk` gene annotation file after viral protein extraction. |
 | `remove_collections` | `false` | Delete intermediate protein FASTA collections after clustering. |
-| `protein_reference_url` | ProGenomes3 EMBL | Override URL for the ProGenomes3 protein archive. |
 
 ### Network
 

@@ -1,7 +1,10 @@
 # CAPELLINI workflow default configuration
 # Copy this file and fill in required paths for your study.
 
-cores: 4                           # Number of CPU cores for Snakemake
+# Number of CPU cores for Snakemake. Left unset on purpose: CAPELLINI then uses
+# every core on the machine. Uncomment to cap it (or set it from the CLI:
+# Settings -> Set number of cores).
+# cores: 4
 
 # ── Global paths (REQUIRED - fill these in) ──────────────────────────────────
 base: ""                           # Root output directory
@@ -13,17 +16,26 @@ bacterial_raw_fasta_folder: ""     # Folder with raw 16S FASTQ files
 # Reference paths (auto-derived from download_path if left empty)
 silva_ref_path: ""
 silva_taxmap_path: ""
+# SILVA species-assignment reference used by DADA2's addSpecies(). It is a
+# separate download from the train_set, fetched automatically on first use and
+# always stored in download_path alongside every other reference — the location
+# is deliberately not configurable.
+silva_species_url: "https://zenodo.org/records/4587955/files/silva_species_assignment_v138.1.fa.gz?download=1"
 
 # ── Pipeline flags ───────────────────────────────────────────────────────────
 species_level: false
-fresh_start: false
-ref_removal: true
+fresh_start: true
+# Delete the ~43 GB proGenomes4 genome archive after Harmonize. Keep this false:
+# the same archive is what SpacePHARER needs to regenerate the spacer collection
+# and the harmonizer needs to rebuild pg4_16s.fasta, so removing it can force a
+# second 43 GB download.
+ref_removal: false
 
 # ── DADA2 ────────────────────────────────────────────────────────────────────
 direction: "forward"               # "forward", "reverse", or "paired"
 bacteria_fasta_name: "16S_DADA2_bacteria.fasta"
 fasta_generation: true
-chimera_removal: false             # Run removeBimeraDenovo after denoising
+chimera_removal: true              # Run removeBimeraDenovo after denoising
 
 # ── Harmonizer (progenomes-harmonizer) ───────────────────────────────────────
 min_bitscore: 50
@@ -36,10 +48,21 @@ extend_taxonomy: true
 # NCBI taxonomy
 ncbi_taxdmp_url: "https://ftp.ncbi.nih.gov/pub/taxonomy/taxdmp.zip"
 
-# proGenomes3 URLs
-genes_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.genes.representatives.fasta.bz2"
-bacContigs_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.contigs.representatives.fasta.bz2"
-protein_reference_url: "http://progenomes3.embl.de/data/repGenomes/progenomes3.proteins.representatives.fasta.bz2"
+# proGenomes4. The harmonize rule builds the 16S reference from the genome
+# contigs with barrnap+seqkit unless you supply a pre-built one via
+# reference_16s. procs_maker (protein_clusters) and spacepharer use their v4
+# default reference URLs automatically. The GCA->taxid map auto-downloads if
+# left empty.
+reference_16s: ""                  # e.g. reference/pg4_16s.fasta (skips barrnap)
+pg4_ncbi_taxonomy: ""              # e.g. reference/pg4_ncbi_taxonomy.tsv
+
+# 16S build (parallel barrnap over the full proGenomes4 genome contigs, split
+# into fixed ~300 Mb chunks). Runs up to `cores` single-threaded barrnap workers,
+# auto-capped by available RAM (barrnap's any2fasta loads a whole chunk into
+# memory, so concurrency x chunk-size is bounded to avoid exhausting RAM).
+barrnap_kingdom: "bac"             # barrnap rRNA HMM kingdom (bac/arc/fun)
+barrnap_evalue: 1.0e-6             # barrnap similarity e-value cut-off
+barrnap_reject: 0.25              # reject 16S aligned below this length fraction
 
 # ── SpacePHARER ──────────────────────────────────────────────────────────────
 min_n_spacers: 3

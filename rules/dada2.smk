@@ -34,6 +34,17 @@ rule dada2:
         # to preserve the validated legacy ASV count when the key is absent
         # (e.g. when using configs that predate this knob).
         chimera_removal="TRUE" if config.get("chimera_removal", False) else "FALSE",
+        # SILVA species-assignment reference for addSpecies(). Declared as a
+        # *param* (not an input) because the R script downloads it on demand —
+        # as an input Snakemake would abort before it could be fetched. It always
+        # lives in download_path with every other reference; not configurable.
+        species_path=(
+            config["download_path"].rstrip("/") + "/silva_species_assignment_v138.1.fa.gz"
+        ),
+        species_url=config.get(
+            "silva_species_url",
+            "https://zenodo.org/records/4587955/files/silva_species_assignment_v138.1.fa.gz?download=1",
+        ),
         r_script=str(SCRIPTS_DIR / "dada2_pipe.R"),
     shell:
         """
@@ -45,5 +56,7 @@ rule dada2:
             "{input.silva_taxmap}" \
             "{params.direction}" \
             "{params.fasta_generation}" \
-            "{params.chimera_removal}"
+            "{params.chimera_removal}" \
+            "{params.species_path}" \
+            "{params.species_url}"
         """

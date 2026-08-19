@@ -8,13 +8,14 @@ All parameters are passed explicitly (no CapelliniConfig dependency).
 from __future__ import annotations
 
 import argparse
-import bz2
+import gzip
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -31,7 +32,14 @@ from Bio import SeqIO
 
 logger = logging.getLogger(__name__)
 
-# Bundled spacers collection path
+# proGenomes4 representative genome contigs — the source MinCED extracts CRISPR
+# spacers from, and the proGenomes4 GCA->taxid map for target filtering.
+PG4_GENOMES_URL = (
+    "https://progenomes.embl.de/data/repGenomes/pg4_genomes_representatives.fna.gz"
+)
+PG4_NCBI_TAXONOMY_URL = "https://progenomes.embl.de/data/pg4_ncbi_taxonomy.tsv.gz"
+
+# Bundled spacers collection path (proGenomes4-derived).
 _BUNDLED_SPACERS = (
     Path(__file__).resolve().parent.parent
     / "capellini_workflow" / "data" / "references" / "spacers"
@@ -175,10 +183,7 @@ def get_spacers_collection(
     min_length: int = 23,
     max_length: int = 47,
     remove_decomp_fasta: bool = True,
-    bacContigs_reference_url: str = (
-        "http://progenomes3.embl.de/data/repGenomes/"
-        "progenomes3.contigs.representatives.fasta.bz2"
-    ),
+    bacContigs_reference_url: str = PG4_GENOMES_URL,
     regenerate: bool = False,
 ) -> Path:
     """Return path to spacers_CompleteCollection.fasta, using the bundled file if present."""
@@ -187,47 +192,78 @@ def get_spacers_collection(
 
     wf = SpacePHARERWorkflow(workdir=sp_folder, spacerdir=str(spacers_path))
 
-    # Bundled file takes priority
-    if _BUNDLED_SPACERS.exists() and not regenerate:
+    # Bundled file takes priority (must be non-empty to be trusted — an empty
+    # placeholder must NOT block the MinCED regeneration fallback below).
+    if _BUNDLED_SPACERS.exists() and _BUNDLED_SPACERS.stat().st_size > 0 and not regenerate:
         logger.info("Bundled spacers_CompleteCollection.fasta found - using it")
         spacers_path.mkdir(parents=True, exist_ok=True)
         if not spacers_collection.exists():
             shutil.copy2(str(_BUNDLED_SPACERS), str(spacers_collection))
         return spacers_collection
 
-    if spacers_collection.exists():
+    if spacers_collection.exists() and spacers_collection.stat().st_size > 0:
         logger.info("Complete spacers collection found - skipping generation")
         return spacers_collection
 
-    # Download, decompress, extract spacers
+    # Regenerate the complete spacer collection from the proGenomes4 genome
+    # contigs with MinCED, in bounded batches. MinCED needs a plain FASTA and
+    # cannot stream gzip, so we stream the .gz and hand it batch-by-batch — the
+    # full ~150-200 GB uncompressed archive is never materialised (peak scratch
+    # is ~one batch). CRISPR arrays live within a single contig, so batching at
+    # contig boundaries yields the same spacers as a single whole-file run.
     filename = os.path.basename(bacContigs_reference_url)
-    bacContigs_reference_path = Path(download_path) / filename
-    bz2_path = bacContigs_reference_path
-    fasta_path = bz2_path.with_suffix("")
-
-    if not bacContigs_reference_path.exists():
-        logger.info("Downloading ProGenomes3 contigs reference (~45 GB) ...")
-        urllib.request.urlretrieve(bacContigs_reference_url, str(bacContigs_reference_path))
-
-    if bz2_path.suffix == ".bz2" and not fasta_path.exists():
-        logger.info("Decompressing bz2 FASTA reference ...")
-        with bz2.open(str(bz2_path), "rb") as fin, open(str(fasta_path), "wb") as fout:
-            shutil.copyfileobj(fin, fout)
+    contigs_ref = Path(download_path) / filename
+    if not contigs_ref.exists():
+        logger.info("Downloading proGenomes4 genome contigs (~large) ...")
+        urllib.request.urlretrieve(bacContigs_reference_url, str(contigs_ref))
 
     spacers_path.mkdir(parents=True, exist_ok=True)
-    logger.info("Extracting spacers with MinCED ...")
-    wf.extract_spacers(
-        fasta_path=str(fasta_path),
-        min_n_spacers=min_n_spacers,
-        min_length=min_length,
-        max_length=max_length,
-        tag="spacers_CompleteCollection",
-    )
+    minced_path = shutil.which("minced") or "minced"
+    opener = gzip.open if contigs_ref.suffix == ".gz" else open
+    batch_bytes = 4 * 1024 ** 3
+    n_batches = 0
 
-    if remove_decomp_fasta and fasta_path.exists():
-        fasta_path.unlink()
-        logger.info("Removed decompressed FASTA: %s", fasta_path)
+    from capellini_workflow.io import atomic_write
 
+    with tempfile.TemporaryDirectory(prefix="pg4_spacers.") as tmp:
+        tmp_dir = Path(tmp)
+        batch_fna = tmp_dir / "batch.fna"
+
+        def run_batch(final_out) -> None:
+            nonlocal n_batches
+            n_batches += 1
+            out_txt = tmp_dir / "batch.txt"
+            out_gff = tmp_dir / "batch.gff"
+            spacers_fa = tmp_dir / "batch_spacers.fa"  # MinCED names it <txt-stem>_spacers.fa
+            for p in (out_txt, out_gff, spacers_fa):
+                p.unlink(missing_ok=True)
+            cmd = (
+                f'"{minced_path}" -spacers -minNR {min_n_spacers} '
+                f'-minRL {min_length} -maxRL {max_length} '
+                f'"{batch_fna}" "{out_txt}" "{out_gff}"'
+            )
+            sh(cmd, f"MinCED - extracting spacers (batch {n_batches})")
+            if spacers_fa.exists():
+                with open(spacers_fa) as src:
+                    shutil.copyfileobj(src, final_out)
+
+        with atomic_write(spacers_collection) as final_out:
+            bf = open(batch_fna, "w")
+            cur = 0
+            with opener(str(contigs_ref), "rt") as fh:
+                for line in fh:
+                    if line.startswith(">") and cur >= batch_bytes:
+                        bf.close()
+                        run_batch(final_out)
+                        bf = open(batch_fna, "w")
+                        cur = 0
+                    bf.write(line)
+                    cur += len(line)
+            bf.close()
+            if cur > 0:
+                run_batch(final_out)
+
+    logger.info("Spacer collection written: %s (%d batches)", spacers_collection, n_batches)
     return spacers_collection
 
 
@@ -235,23 +271,59 @@ def filter_target_spacers(
     spacers_collection: Path,
     ncbi_id_target_set_int: set,
     input_fasta_folder: str | Path,
+    gca_to_taxid: dict[str, int],
 ) -> Path:
-    """Filter spacers_CompleteCollection.fasta to cohort-specific NCBI IDs."""
-    target_spacers_path = Path(input_fasta_folder) / "target_spacers.fasta"
-    ncbi_id_target_set_str = set(str(i) for i in ncbi_id_target_set_int)
+    """Filter spacers_CompleteCollection.fasta to cohort-specific NCBI IDs.
 
-    logger.info("Filtering spacers to %s target NCBI IDs", len(ncbi_id_target_set_str))
+    proGenomes4 spacer headers begin with the versioned GCA accession
+    (``GCA_000005825.2_...``), not the taxid, so the taxid is resolved from the
+    GCA -> taxid map before comparing against the target set.
+    """
+    from progenomes_harmonizer.reference import parse_gca
+    from capellini_workflow.io import atomic_write
+
+    target_spacers_path = Path(input_fasta_folder) / "target_spacers.fasta"
+
+    logger.info("Filtering spacers to %s target NCBI IDs", len(ncbi_id_target_set_int))
     # Atomic write so an interrupted run can't leave a half-filtered
     # target_spacers.fasta that the next run silently reuses.
-    from capellini_workflow.io import atomic_write
     with atomic_write(target_spacers_path) as fasta_out:
         for record in SeqIO.parse(str(spacers_collection), "fasta"):
-            ncbi_id = record.id.split(".")[0]
-            if ncbi_id in ncbi_id_target_set_str:
+            gca = parse_gca(record.id)
+            taxid = gca_to_taxid.get(gca) if gca else None
+            if taxid in ncbi_id_target_set_int:
                 SeqIO.write(record, fasta_out, "fasta")
 
     logger.info("Filtered spacers written: %s", target_spacers_path)
     return target_spacers_path
+
+
+def _target_taxid_set(silva_fixed: pd.DataFrame, species_level: bool) -> set:
+    """Cohort target taxids used to filter the CRISPR spacer collection.
+
+    ``species_level`` only ever *adds* precision: species taxids are layered on
+    top of the genus ones, never replacing them. ``addSpecies()`` assigns a
+    species only on an exact, unambiguous match, so most ASVs have none —
+    building the set as ``species | family`` would silently drop every
+    genus-level target and make spacer selection coarser, the same trap fixed in
+    the harmonizer's ``target_taxids`` chain.
+
+    Args:
+        silva_fixed: Harmonized taxonomy table with the progenomes_taxid_* columns.
+        species_level: Whether to include the species layer.
+
+    Returns:
+        Set of integer NCBI taxids to target.
+    """
+    def _col(name: str) -> set:
+        if name not in silva_fixed:
+            return set()
+        return set(silva_fixed[name].dropna().astype(int))
+
+    taxids = _col("progenomes_taxid_genus") | _col("progenomes_taxid_family")
+    if species_level:
+        taxids |= _col("progenomes_taxid_species")
+    return taxids
 
 
 def run_spacepharer(
@@ -267,10 +339,9 @@ def run_spacepharer(
     max_length: int = 47,
     fdr: float = 0.05,
     remove_decomp_fasta: bool = True,
-    bacContigs_reference_url: str = (
-        "http://progenomes3.embl.de/data/repGenomes/"
-        "progenomes3.contigs.representatives.fasta.bz2"
-    ),
+    bacContigs_reference_url: str = PG4_GENOMES_URL,
+    pg4_ncbi_taxonomy_path: str = "",
+    pg4_ncbi_taxonomy_url: str = PG4_NCBI_TAXONOMY_URL,
     regenerate_spacers: bool = False,
 ) -> None:
     """Run the full SpacePHARER stage: spacer collection, filtering, and prediction."""
@@ -282,19 +353,20 @@ def run_spacepharer(
 
     check_and_install_spacepharer()
 
+    # proGenomes4 spacer headers carry the versioned GCA (not the taxid), so load
+    # the GCA -> taxid map used to filter spacers to the cohort's target taxa.
+    from progenomes_harmonizer.reference import load_gca_to_taxid
+    from capellini_workflow.io import download_if_missing
+    if not pg4_ncbi_taxonomy_path:
+        pg4_ncbi_taxonomy_path = str(Path(download_path) / Path(pg4_ncbi_taxonomy_url).name)
+    download_if_missing(pg4_ncbi_taxonomy_url, pg4_ncbi_taxonomy_path,
+                        label="proGenomes4 ncbi taxonomy")
+    gca_to_taxid = load_gca_to_taxid(pg4_ncbi_taxonomy_path)
+
     silva_fixed = pd.read_csv(silva_fixed_path, index_col=0)
 
     # Build target sets
-    if species_level:
-        ncbi_id_target_set_int = (
-            set(silva_fixed["progenomes_taxid_species"].dropna().astype(int))
-            | set(silva_fixed["progenomes_taxid_family"].dropna().astype(int))
-        )
-    else:
-        ncbi_id_target_set_int = (
-            set(silva_fixed["progenomes_taxid_genus"].dropna().astype(int))
-            | set(silva_fixed["progenomes_taxid_family"].dropna().astype(int))
-        )
+    ncbi_id_target_set_int = _target_taxid_set(silva_fixed, species_level)
 
     print(f"Resolution: {'species' if species_level else 'genus'}-level")
     print(f"Total unique NCBI target IDs: {len(ncbi_id_target_set_int)}")
@@ -313,7 +385,7 @@ def run_spacepharer(
 
     # Filter to target taxa
     target_spacers_path = filter_target_spacers(
-        spacers_collection, ncbi_id_target_set_int, input_fasta_folder
+        spacers_collection, ncbi_id_target_set_int, input_fasta_folder, gca_to_taxid
     )
 
     # Run SpacePHARER
@@ -341,13 +413,22 @@ def compute_spacepharer_stats(
     min_bitscore: int = 50,
 ) -> None:
     """Print the full pipeline statistics summary (Sections 1-3 from notebook)."""
+    from progenomes_harmonizer.reference import parse_gca, load_gca_to_taxid
+    from capellini_workflow.io import download_if_missing
+
     silva_fixed = pd.read_csv(silva_fixed_path, index_col=0)
     topBitScore_df = pd.read_csv(topBitScore_path, index_col=0)
 
     sp_folder = Path(sp_folder)
     virus_fasta = Path(virus_fasta_path)
     spacers_collection = Path(download_path) / "spacers" / "spacers_CompleteCollection.fasta"
-    reference_16S_path = Path(input_fasta_folder) / "progenome16S.fasta"
+    reference_16S_path = Path(input_fasta_folder) / "pg4_16s.fasta"
+
+    # proGenomes4 headers carry the versioned GCA, not the taxid — resolve taxids
+    # from the GCA -> taxid map.
+    pg4_tax_path = Path(download_path) / Path(PG4_NCBI_TAXONOMY_URL).name
+    download_if_missing(PG4_NCBI_TAXONOMY_URL, pg4_tax_path, label="proGenomes4 ncbi taxonomy")
+    gca_to_taxid = load_gca_to_taxid(pg4_tax_path)
 
     n_viral_contigs = sum(1 for _ in SeqIO.parse(str(virus_fasta), "fasta"))
 
@@ -356,23 +437,14 @@ def compute_spacepharer_stats(
     with open(str(reference_16S_path), "r") as fh:
         for rec in SeqIO.parse(fh, "fasta"):
             n_16s_records += 1
-            ncbi_id = rec.id.split(".")[0]
-            if ncbi_id.isdigit():
-                unique_16s_ncbi_ids.add(ncbi_id)
+            taxid = gca_to_taxid.get(parse_gca(rec.id))
+            if taxid is not None:
+                unique_16s_ncbi_ids.add(taxid)
     n_16s_ncbi_ids = len(unique_16s_ncbi_ids)
 
     n_complete_spacers = sum(1 for _ in SeqIO.parse(str(spacers_collection), "fasta")) if spacers_collection.exists() else 0
 
-    if species_level:
-        ncbi_id_target_set_int = (
-            set(silva_fixed["progenomes_taxid_species"].dropna().astype(int))
-            | set(silva_fixed["progenomes_taxid_family"].dropna().astype(int))
-        )
-    else:
-        ncbi_id_target_set_int = (
-            set(silva_fixed["progenomes_taxid_genus"].dropna().astype(int))
-            | set(silva_fixed["progenomes_taxid_family"].dropna().astype(int))
-        )
+    ncbi_id_target_set_int = _target_taxid_set(silva_fixed, species_level)
 
     ncbi_id_target_set_str = set(str(i) for i in ncbi_id_target_set_int)
     target_hits = topBitScore_df[topBitScore_df["NCBI ID"].isin(ncbi_id_target_set_str)]
@@ -385,7 +457,9 @@ def compute_spacepharer_stats(
     if target_spacers_path.exists():
         for record in SeqIO.parse(str(target_spacers_path), "fasta"):
             n_bac_spacers += 1
-            ncbi_ids_with_spacers.add(record.id.split(".")[0])
+            taxid = gca_to_taxid.get(parse_gca(record.id))
+            if taxid is not None:
+                ncbi_ids_with_spacers.add(taxid)
     n_ncbi_with_spacers = len(ncbi_ids_with_spacers)
 
     n_asvs_total = len(silva_fixed)
@@ -445,7 +519,7 @@ def compute_spacepharer_stats(
     print(f"  Bacterial genomes (unique GCAs)         : {n_bac_genomes:>8,}")
     print(f"  Bacterial genomes (unique NCBI IDs)     : {n_bac_genomes_ncbi:>8,}")
     print(f"  Bacterial spacers (cohort-specific)     : {n_bac_spacers:>8,}")
-    print(f"\n  [MMSeqs2 - 16S vs ProGenomes3 16S]")
+    print(f"\n  [MMSeqs2 - 16S vs proGenomes4 16S]")
     print(f"  ASVs with >=1 hit (bitscore >= {min_bitscore})      : {n_asvs_matched:>8,}  ({pct_matched:.1f}%)")
     print(f"  Mean / Median bitscore                  : {mean_bitscore:>6.1f}  / {median_bitscore:.1f}")
     print(f"\n  [NCBI TAXID ASSIGNMENT - 3-layer]")
@@ -477,6 +551,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-length", type=int, default=47)
     parser.add_argument("--fdr", type=float, default=0.05)
     parser.add_argument("--remove-decomp-fasta", action="store_true", default=True)
+    parser.add_argument("--pg4-ncbi-taxonomy", default="",
+                        help="Path to pg4_ncbi_taxonomy.tsv(.gz) (GCA->taxid map). "
+                             "Defaults to <download-path>/pg4_ncbi_taxonomy.tsv.gz; "
+                             "downloaded if missing.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -493,4 +571,5 @@ if __name__ == "__main__":
         max_length=args.max_length,
         fdr=args.fdr,
         remove_decomp_fasta=args.remove_decomp_fasta,
+        pg4_ncbi_taxonomy_path=args.pg4_ncbi_taxonomy,
     )

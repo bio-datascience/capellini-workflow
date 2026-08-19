@@ -20,8 +20,10 @@ from urllib.error import HTTPError, URLError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TAG = "v0.1.0"
-RELEASES_BASE = "https://github.com/AlexDellOrti/Capellini/releases/download"
+DEFAULT_TAG = "v0.2.0"
+RELEASES_BASE = (
+    "https://github.com/bio-datascience/capellini-workflow/releases/download"
+)
 
 # (asset_filename, destination relative to capellini_workflow/data/)
 ASSETS: tuple[tuple[str, str], ...] = (
@@ -87,7 +89,7 @@ def fetch_references(
     This fetches:
       * ``spacers_CompleteCollection.fasta`` into ``capellini_workflow/data/``
         (owned by this package).
-      * ``progenome16S.fasta`` into ``progenomes_harmonizer/data/`` by
+      * ``pg4_16s.fasta`` into ``progenomes_harmonizer/data/`` by
         delegating to that tool's own ``fetch_references``. Each tool owns
         its own bundle, but from the user's perspective one "Fetch
         references" action should populate both — that's what this wrapper
@@ -120,7 +122,7 @@ def fetch_references(
         print(f"  saved: {dest}  ({_human_size(size)})\n")
         paths.append(dest)
 
-    # Chain the harmonizer's fetch so progenome16S.fasta also ends up bundled.
+    # Chain the harmonizer's fetch so pg4_16s.fasta also ends up bundled.
     # We import lazily so the workflow can still be installed without the
     # harmonizer present (e.g. for development on the workflow alone).
     try:
@@ -130,7 +132,7 @@ def fetch_references(
     except ImportError:
         print(
             "\n[warning] progenomes-harmonizer is not installed in this "
-            "environment — skipping progenome16S.fasta fetch.\n"
+            "environment — skipping pg4_16s.fasta fetch.\n"
             "Install it with `pip install progenomes-harmonizer` and re-run "
             "fetch-references to get the 16S bundle."
         )
